@@ -1,7 +1,8 @@
+use ccase::{UserCase, UserPattern};
 use clap::ArgMatches;
-use convert_case::{Boundary, Case, Converter, Pattern};
-use std::env;
-use std::io::{self, Read};
+use convert_case::{Boundary, Converter};
+use is_terminal::IsTerminal;
+use std::io::{self, stdin, BufRead};
 
 fn main() {
     let mut app = ccase::build_app();
@@ -12,80 +13,54 @@ fn main() {
             \x1b[32m<input>...\x1b[m",
     );
 
-    let args = get_args_with_stdin();
+    let matches = app.get_matches();
 
-    let matches = app.get_matches_from(args);
-
-    let inputs = match matches.get_many::<String>("input") {
+    let inputs: Box<dyn Iterator<Item = String>> = match matches.get_many::<String>("input") {
+        Some(values) => Box::new(values.cloned()),
         None => {
-            if atty::isnt(atty::Stream::Stdin) {
-                Default::default()
+            if stdin_is_piped() {
+                let stdin = io::stdin();
+                let reader = io::BufReader::new(stdin.lock());
+                Box::new(reader.lines().map(|l| l.unwrap()))
             } else {
                 missing_error.exit();
             }
         }
-        Some(inputs) => inputs,
     };
 
-    /*
-    inputs.for_each(|input| {
-        println!("{:?}", input);
-        convert(&matches, input)
-    });
-    */
-    inputs.for_each(|input| convert(&matches, input));
-}
-
-fn get_args_with_stdin() -> Vec<String> {
-    let mut args: Vec<String> = env::args_os().map(|x| x.into_string().unwrap()).collect();
-
-    if atty::isnt(atty::Stream::Stdin) {
-        let stdin = io::stdin();
-        let mut handle = stdin.lock();
-
-        let mut v = Vec::new();
-        handle.read_to_end(&mut v).unwrap();
-
-        let s = String::from_utf8(v).unwrap();
-
-        if !s.is_empty() {
-            for word in s.lines() {
-                args.push(word.trim_end().to_string());
-            }
-        }
-    }
-
-    args
+    inputs.for_each(|input| convert(&matches, &input));
 }
 
 fn convert(matches: &ArgMatches, input: &String) {
-    // check if from or boundaries or none
-
     let mut conv = Converter::new();
 
-    if let Some(&from) = matches.get_one::<Case>("from") {
-        // --from
-        conv = conv.from_case(from);
+    if let Some(&from) = matches.get_one::<UserCase>("from") {
+        conv = conv.from_case(from.into());
     } else if let Some(boundary_str) = matches.get_one::<String>("boundaries") {
-        // --boundaries
-        let boundaries = Boundary::list_from(boundary_str.as_str());
+        let boundaries = Boundary::defaults_from(boundary_str);
         conv = conv.set_boundaries(&boundaries);
     }
 
-    if let Some(&to) = matches.get_one::<Case>("to") {
-        // --to
-        conv = conv.to_case(to);
-    } else if let Some(&pattern) = matches.get_one::<Pattern>("pattern") {
-        // --pattern
-        conv = conv.set_pattern(pattern);
+    if let Some(&to) = matches.get_one::<UserCase>("to") {
+        conv = conv.to_case(to.into());
+    } else if let Some(&pattern) = matches.get_one::<UserPattern>("pattern") {
+        conv = conv.set_pattern(pattern.apply());
 
         if let Some(delim) = matches.get_one::<String>("delimeter") {
-            // --delimeter
             conv = conv.set_delim(delim);
         }
     }
 
-    println!("{}", conv.convert(input))
+    println!("{}", conv.convert(input));
+}
+
+fn stdin_is_piped() -> bool {
+    if cfg!(debug_assertions) {
+        if let Ok(val) = std::env::var("CCASE_TEST_STDIN_IS_PIPED") {
+            return val == "true";
+        }
+    }
+    !stdin().is_terminal()
 }
 
 #[cfg(test)]
@@ -162,10 +137,16 @@ mod test {
             .stdout("My.var.name\n");
     }
 
-    #[ignore] // atty is tricked in test, look at ccase -t snake manually
     #[test]
     fn input_required() {
-        ccase(&["-t", "snake"])
+        let assert = Command::cargo_bin("ccase")
+            .unwrap()
+            .arg("-t")
+            .arg("snake")
+            .env("CCASE_TEST_STDIN_IS_PIPED", "false")
+            .assert();
+
+        assert
             .failure()
             .stderr(contains("following required arguments"))
             .stderr(contains("input"));
@@ -196,11 +177,11 @@ mod test {
     fn invalid_case() {
         ccase(&["-t", "SNEK", "myVarName"])
             .failure()
-            .stderr(contains("Invalid value"))
+            .stderr(contains("variant not found"))
             .stderr(contains("--to"));
         ccase(&["-t", "snake", "-f", "SNEK", "my-varName"])
             .failure()
-            .stderr(contains("Invalid value"))
+            .stderr(contains("variant not found"))
             .stderr(contains("--from"));
     }
 
@@ -208,11 +189,11 @@ mod test {
     fn invalid_pattern() {
         ccase(&["-p", "SENT", "myVarName"])
             .failure()
-            .stderr(contains("Invalid value"))
+            .stderr(contains("variant not found"))
             .stderr(contains("--pattern"));
         ccase(&["-p", "SENT", "-f", "snake", "my-varName"])
             .failure()
-            .stderr(contains("Invalid value"))
+            .stderr(contains("variant not found"))
             .stderr(contains("--pattern"));
     }
 
@@ -245,6 +226,30 @@ mod test {
         ccase(&["-t", "snake", "myVarName", "anotherMultiWordToken"])
             .success()
             .stdout("my_var_name\nanother_multi_word_token\n");
+    }
+
+    #[test]
+    fn help_contains_cases_and_patterns() {
+        let output = Command::cargo_bin("ccase")
+            .unwrap()
+            .arg("--help")
+            .assert()
+            .get_output()
+            .stdout
+            .clone();
+        let help_text = String::from_utf8_lossy(&output);
+        assert!(help_text.contains("camel"));
+        assert!(help_text.contains("noop"));
+        assert!(help_text.contains("snake"));
+        assert!(help_text.contains("title"));
+        assert!(help_text.contains("train"));
+    }
+
+    #[test]
+    fn pattern_with_custom_delimiter() {
+        ccase(&["-p", "camel", "-d", "++", "my_var_name"])
+            .success()
+            .stdout("my++Var++Name\n");
     }
 
     mod stdin {
@@ -282,6 +287,19 @@ mod test {
             pipe_ccase("myVarName\nanotherMultiWordToken\n", &["-t", "Pascal"])
                 .success()
                 .stdout("MyVarName\nAnotherMultiWordToken\n");
+        }
+
+        #[test]
+        fn stdin_not_consumed_when_input_arg_provided() {
+            let assert = Command::cargo_bin("ccase")
+                .unwrap()
+                .arg("--to")
+                .arg("upper")
+                .arg("hello")
+                .write_stdin("foo\nbar\nbaz\n")
+                .assert();
+
+            assert.success().stdout("HELLO\n");
         }
     }
 }

@@ -1,6 +1,7 @@
-use crate::{case_value_parser, pattern_value_parser, CaseExtension, PatternExtension};
+use crate::{UserCase, UserPattern};
 use clap::{builder::StyledStr, crate_version, Arg, ArgAction, Command};
-use convert_case::{Case, Casing};
+use std::fmt::Write;
+use strum::IntoEnumIterator;
 
 pub fn build() -> Command {
     Command::new("ccase")
@@ -47,25 +48,27 @@ fn after_help() -> StyledStr {
 
 fn list_cases() -> String {
     let mut s = String::new();
-    for case in Case::all_cases() {
-        let case_str = format!("{:?}", case).to_case(Case::Flat);
+    for case in UserCase::iter() {
+        let case_str = case.to_string();
         let underline_case = format!("\x1b[1m{}\x1b[0m", case_str);
-        s = format!("{}{:>25}  {}\n", s, underline_case, case.name_in_case())
+        writeln!(s, "{:>25}  {}", underline_case, case.example()).unwrap();
     }
     s
 }
 
 fn list_patterns() -> String {
     let mut s = String::new();
-    for pattern in crate::all_patterns() {
-        let pattern_str = format!("{:?}", pattern).to_case(Case::Flat);
+    for pattern in UserPattern::iter() {
+        let pattern_str = pattern.to_string();
         let underline_pattern = format!("\x1b[1m{}\x1b[0m", pattern_str);
-        s = format!("{}{:>25}  {}\n", s, underline_pattern, pattern.example())
+        writeln!(s, "{:>25}  {}", underline_pattern, pattern.example()).unwrap();
     }
     s
 }
 
 mod args {
+    use clap::value_parser;
+
     use super::*;
 
     pub fn all() -> [Arg; 6] {
@@ -82,7 +85,7 @@ mod args {
                 "Convert the input into this case.  \
                 The input is mutated and joined using the pattern and delimiter of the case.",
             )
-            .value_parser(case_value_parser)
+            .value_parser(value_parser!(UserCase))
             .required_unless_present("pattern")
     }
 
@@ -96,7 +99,7 @@ mod args {
                 "Parse the input as if it were this case.  \
                 This means splitting the input based on boundaries found in that case.",
             )
-            .value_parser(case_value_parser)
+            .value_parser(value_parser!(UserCase))
     }
 
     fn boundaries() -> Arg {
@@ -120,7 +123,7 @@ mod args {
             .help("Pattern to transform words")
             .long_help("Transform the words after splitting the input based upon the pattern.")
             .conflicts_with("to")
-            .value_parser(pattern_value_parser)
+            .value_parser(value_parser!(UserPattern))
     }
 
     fn delimeter() -> Arg {
